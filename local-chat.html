@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>local chat</title>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1>local chat</h1>
+    <span id="model-status">—</span>
+  </div>
+
+  <!-- load screen -->
+  <div id="load-screen">
+    <div id="load-label">Qwen2.5 · 0.5B · instruct</div>
+    <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
+    <p>the model runs entirely in your browser.<br/>first load downloads ~300 MB and is cached for future visits.</p>
+    <button id="load-btn">load model</button>
+  </div>
+
+  <!-- chat ui (hidden until ready) -->
+  <div id="messages" class="hidden"></div>
+  <div id="input-bar" class="hidden">
+    <textarea id="chat-input" rows="1" placeholder="type a message…" disabled></textarea>
+    <button id="send-btn" disabled>send</button>
+  </div>
+</div>
+
+<script type="module">
+  import { pipeline, TextStreamer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js';
+
+  const MODEL_ID = 'onnx-community/Qwen2.5-0.5B-Instruct';
+
+  const loadScreen   = document.getElementById('load-screen');
+  const loadBtn      = document.getElementById('load-btn');
+  const progressBar  = document.getElementById('progress-bar');
+  const loadLabel    = document.getElementById('load-label');
+  const modelStatus  = document.getElementById('model-status');
+  const messagesEl   = document.getElementById('messages');
+  const inputBar     = document.getElementById('input-bar');
+  const chatInput    = document.getElementById('chat-input');
+  const sendBtn      = document.getElementById('send-btn');
+
+  let generator = null;
+  let history = []; // { role, content }[]
+  let generating = false;
+
+  // ── auto-resize textarea ──
+  chatInput.addEventListener('input', () => {
+    chatInput.style.height = 'auto';
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+  });
+
+  // ── load model ──
+  loadBtn.addEventListener('click', async () => {
+    loadBtn.disabled = true;
+    loadLabel.textContent = 'loading…';
+    modelStatus.textContent = 'loading';
+
+    try {
+      generator = await pipeline('text-generation', MODEL_ID, {
+        dtype: 'q4',
+        progress_callback: (p) => {
+          if (p.status === 'downloading' || p.status === 'progress') {
+            const pct = p.progress ? Math.round(p.progress) : 0;
+            progressBar.style.width = pct + '%';
+            loadLabel.textContent = `${p.file ?? 'model'} · ${pct}%`;
+          }
+          if (p.status === 'ready') {
+            progressBar.style.width = '100%';
+          }
+        },
+      });
+
+      // switch to chat ui
+      loadScreen.classList.add('hidden');
+      messagesEl.classList.remove('hidden');
+      inputBar.classList.remove('hidden');
+      chatInput.disabled = false;
+      sendBtn.disabled = false;
+      chatInput.focus();
+      modelStatus.textContent = 'ready';
+
+    } catch (err) {
+      loadLabel.textContent = 'error loading model';
+      loadBtn.disabled = false;
+      loadBtn.textContent = 'retry';
+      console.error(err);
+      modelStatus.textContent = 'error';
+    }
+  });
+
+  // ── send message ──
+  async function sendMessage() {
+    const text = chatInput.value.trim();
+    if (!text || generating || !generator) return;
+
+    generating = true;
+    sendBtn.disabled = true;
+    chatInput.disabled = true;
+    chatInput.value = '';
+    chatInput.style.height = 'auto';
+
+    // append user bubble
+    appendBubble('user', text);
+    history.push({ role: 'user', content: text });
+
+    // create bot bubble with cursor
+    const botBubble = appendBubble('bot', '');
+    const cursor = document.createElement('span');
+    cursor.className = 'cursor';
+    botBubble.appendChild(cursor);
+    scrollToBottom();
+
+    let botText = '';
+
+    try {
+      const streamer = new TextStreamer(generator.tokenizer, {
+        skip_prompt: true,
+        skip_special_tokens: true,
+        callback_function: (chunk) => {
+          botText += chunk;
+          botBubble.textContent = botText;
+          botBubble.appendChild(cursor);
+          scrollToBottom();
+        },
+      });
+
+      const messages = [
+        { role: 'system', content: 'You are a helpful assistant. Be concise.' },
+        ...history,
+      ];
+
+      await generator(messages, {
+        max_new_tokens: 300,
+        do_sample: true,
+        temperature: 0.7,
+        top_p: 0.9,
+        repetition_penalty: 1.1,
+        streamer,
+      });
+
+      history.push({ role: 'assistant', content: botText });
+
+    } catch (err) {
+      botBubble.textContent = '[error: ' + err.message + ']';
+      console.error(err);
+    } finally {
+      cursor.remove();
+      generating = false;
+      sendBtn.disabled = false;
+      chatInput.disabled = false;
+      chatInput.focus();
+      scrollToBottom();
+    }
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  // ── helpers ──
+  function appendBubble(role, text) {
+    const msg = document.createElement('div');
+    msg.className = 'msg ' + role;
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    msg.appendChild(bubble);
+    messagesEl.appendChild(msg);
+    scrollToBottom();
+    return bubble;
+  }
+
+  function scrollToBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+</script>
+</body>
+</html>
